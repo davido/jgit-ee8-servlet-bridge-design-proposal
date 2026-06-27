@@ -4,10 +4,6 @@
 > JGit, alongside the canonical `jakarta.servlet` modules, so downstream
 > consumers that cannot migrate to `jakarta.servlet` can keep tracking JGit
 > master.
->
-> This repository hosts the full design write-up; the corresponding feature
-> request is tracked as a GitHub issue in
-> [`eclipse-jgit/jgit`](https://github.com/eclipse-jgit/jgit/issues).
 
 ---
 
@@ -35,12 +31,44 @@ We are deliberately asking for the **most minimally invasive** support the JGit
 community can give: additive, generated modules; the canonical **production**
 servlet modules and sources untouched; original package names preserved (zero
 import churn for consumers); and **no change to the JGit p2 update site**. The
-new maintenance surface is the Bazel transform ruleset, the Maven copy/rewrite
-wiring, a small hand-maintained EE8 `AppServer` test overlay, and the tests that
-exercise and guard them.
+new maintenance surface is small and, for the Bazel transform, **shared**: a
+direction-agnostic `sed` transform toolchain in bazlets (also used by Gitiles,
+and by the Gerrit companion wiring), the Maven copy/rewrite wiring, a small
+hand-maintained EE8 `AppServer` test overlay, and the tests that exercise and
+guard them.
 
 A complete, tested implementation is already up for review under topic
 [`ee8-servlet-bridge`](https://review.gerrithub.io/q/topic:%22ee8-servlet-bridge%22).
+
+---
+
+## The shared transform toolchain
+
+The Bazel EE8 generation uses a single, shared toolchain that lives in
+[bazlets](https://gerrit.googlesource.com/bazlets)
+(`@com_googlesource_gerrit_bazlets//tools`):
+
+- `servlet_transform.bzl` — the `transform_srcjar` rule that produces the
+  flavour srcjar.
+- `junit.bzl` — the `junit_tests` macro, with an optional `suite_srcs`
+  parameter so a transformed test `.srcjar` is compiled while the
+  `@Suite.SuiteClasses` names are scanned from the canonical `.java` sources
+  (valid because the transform preserves package and class names).
+- `generated_srcs_test.sh` — the generation checker (derivation, line-count,
+  and direction-specific residue checks).
+
+The rewrite is a plain **`sed` package-prefix substitution**, so it pulls in
+**no external dependency at all**. The universal servlet/Jetty package mapping
+is built into the rule; a consumer selects only a **direction** (`to_javax`
+for JGit's `.ee8`, `to_jakarta` for Gitiles' `.ee10`) and carries **no renames
+data** of its own. Being dependency-free, the same toolchain works on both
+bzlmod (JGit master) and WORKSPACE (the `stable-7.4` backport) branches.
+
+**Trade-off for the JGit community to weigh:** the Bazel EE8 generation depends
+on the bazlets repo (which JGit master already references via `git_repository`).
+If JGit prefers the transform to live in-tree, the same `sed` rule can instead
+be vendored under `tools/jgit-ee8` with no functional change — it is
+deliberately dependency-free.
 
 ---
 
@@ -66,19 +94,19 @@ This is the key point, and it is what distinguishes the proposal from a
 downstream hack: the EE8 modules are **full members of JGit**, not a temporary
 bridge living in a consumer's build.
 
-- **Both toolchains, at parity with canonical** — Bazel (Eclipse
-  Transformer-backed srcjar flow) **and** Maven (copy-and-rewrite reactor); the
-  Maven build + tests are green on CI.
+- **Both toolchains, at parity with canonical** — Bazel (a shared, `sed`-based
+  servlet-flavour transform from bazlets) **and** Maven (copy-and-rewrite
+  reactor); the Maven build + tests have been verified with the series.
 - **Real OSGi bundles** — each EE8 module carries its own
   `META-INF/MANIFEST.MF` (`Bundle-SymbolicName: …ee8`,
   `Import-Package: javax.servlet;version="[4.0.0,5.0.0)"`, Jetty EE8 imports),
   `build.properties`, and Eclipse PDE project files — i.e. valid OSGi bundles
   just like every other JGit jar.
-- **Tested** — in Bazel, `generated_srcs_test` guards the generation (sources
-  derived from the canonical filegroups, line counts preserved, no `jakarta`
-  residue); the Maven copy/rewrite path is exercised by the EE8 Maven reactor
-  tests. Both run the servlet-facing HTTP/LFS suites against the generated EE8
-  jars.
+- **Tested** — in Bazel, `generated_srcs_test` (the shared bazlets checker)
+  guards the generation (sources derived from the canonical filegroups, line
+  counts preserved, no `jakarta` residue); the Maven copy/rewrite path is
+  exercised by the EE8 Maven reactor tests. Both run the servlet-facing HTTP/LFS
+  suites against the generated EE8 jars.
 - **IDE-supported** — generated source jars attach to the EE8 binary jars, so
   breakpoints in the running `javax.servlet` classes bind and step correctly;
   verified live in **Eclipse and IntelliJ** (developer story documented in
@@ -148,9 +176,8 @@ It was Bazel-only, Gerrit-local, and not covered by Eclipse/PDE integration or
 JGit-owned generation tests. **This proposal is the opposite approach** —
 first-class EE8 modules *inside JGit*, covered by tests and IDE debugging, while
 leaving the canonical production servlet modules and sources untouched. It
-addresses that revert
-reason by moving the rewrite into JGit-owned modules with Maven- and
-Eclipse-visible metadata, source attachment, and tests.
+addresses that revert reason by moving the rewrite into JGit-owned modules with
+Maven- and Eclipse-visible metadata, source attachment, and tests.
 
 ---
 
@@ -166,19 +193,25 @@ stable-7.4 EE8 experiments/backports that are not part of this request):
 1. **Bazel: Rename `//lib:servlet-api` → `//lib:jakarta-servlet-api`** —
    disambiguate the label before introducing the `javax` one.
 2. **Bazel: Add EE8 servlet bridge targets** — the generated `.ee8` libraries
-   (`org.eclipse.jgit.http.server.ee8`, `…lfs.server.ee8`) plus the
-   `tools/jgit-ee8` transform that rewrites only servlet imports
-   (`jakarta` → `javax`, Jetty EE10 → EE8), keeping the original Java packages
-   and source line numbers.
-3. **Bazel: Add EE8 servlet test targets** — EE8 test modules and
+   (`org.eclipse.jgit.http.server.ee8`, `…lfs.server.ee8`). They consume the
+   shared bazlets `transform_srcjar` rule with `direction = "to_javax"`
+   (rewrites only servlet imports — `jakarta` → `javax`, Jetty EE10 → EE8 —
+   keeping the original Java packages and source line numbers). JGit carries no
+   transform code or renames data of its own.
+3. **Bazel: Add EE8 servlet test targets** — EE8 test modules and the shared
    `generated_srcs_test`; the servlet-facing HTTP/LFS suites run against the
-   generated EE8 jars.
+   generated EE8 jars, built with the bazlets `junit_tests` macro (canonical
+   suite class names supplied via its `suite_srcs` parameter).
 4. **Maven: Add EE8 build, tests, and resources** — a Maven reactor and OSGi
-   manifests so the EE8 jars also build and test under Maven (green on CI).
+   manifests so the EE8 jars also build and test under Maven.
 5. **junit.http: Extract AppServerBase to dedupe the EE8 AppServer overlay** —
    refactor of the one test helper that cannot be auto-rewritten (a structural
    Jetty EE8 security-API difference) so it shares a base class instead of being
    a copy.
+
+> The shared toolchain itself is added by a **bazlets** change,
+> *"tools: Add shared servlet-flavour transform toolchain"*, which JGit (and
+> Gitiles/Gerrit) then consume.
 
 **Gerrit companion** — *"Bazel: Move Gerrit off JGit servlet-4 via EE8 bridge"*:
 rewires `//lib:jgit-servlet` to the EE8 module, attaches the generated EE8
@@ -190,9 +223,9 @@ developer story, and adds a Bazel `somepath()` no-duplicate-classpath test
 
 ## Status and verification
 
-The implementation is complete and green on **both toolchains** (verified on the
-series head, *"junit.http: Extract AppServerBase to dedupe the EE8 AppServer
-overlay"*):
+The JGit implementation is complete and locally green on **both toolchains**
+(verified on the series head, *"junit.http: Extract AppServerBase to dedupe the
+EE8 AppServer overlay"*):
 
 - **Bazel** — `bazelisk test //tools/jgit-ee8:generated_srcs_test
   //org.eclipse.jgit.http.test.ee8:http
@@ -201,8 +234,14 @@ overlay"*):
   `mvn -f org.eclipse.jgit.ee8/pom.xml test` → `BUILD SUCCESS`, 293 tests,
   0 failures, 0 errors.
 
-Beyond local runs, the changes are **CI-verified on their review systems**: the
-JGit series and the Gerrit companion both pass CI (Verified+1).
+The public review systems should still be treated as the source of truth for
+current CI state, especially for companion changes that may need to be
+re-verified after the prerequisite bazlets/JGit changes are published.
+
+Adjacent ecosystem validation is also in place, outside this JGit request:
+Gitiles has migrated to the same shared bazlets transform in the opposite
+direction (`to_jakarta`) for its EE10 servlet flavour, and the Gerrit LFS plugin
+has migrated to consume the JGit EE8 servlet bridge.
 
 The `generated_srcs_test` enforces the generation invariants: the EE8 sources
 are derived from the canonical `srcs` filegroups, source line counts are
@@ -225,10 +264,12 @@ produces **two artifacts from one tree**:
 
 Reaching that requires **every major Gerrit dependency — JGit, Gitiles, and the
 plugin ecosystem — to provide both EE8 and EE10 variants.** Adding first-class
-EE8 modules to JGit is the **first building block**. To be clear: the dual-WAR
-work is a **future goal and is not requested here** — it is the *motivation* for
-why JGit (and the others) should expose EE8 as a first-class citizen alongside
-EE10. As Nasser Grainawi framed it on the Gerrit contributor call and in the
+EE8 modules to JGit is the **first building block** — and the shared bazlets
+transform is what lets the *same* toolchain produce JGit's `.ee8` flavour and
+Gitiles' `.ee10` flavour from one rule. To be clear: the dual-WAR work is a
+**future goal and is not requested here** — it is the *motivation* for why JGit
+(and the others) should expose EE8 as a first-class citizen alongside EE10. As
+Nasser Grainawi framed it on the Gerrit contributor call and in the
 [#jgit channel of the Gerrit Discord](https://discord.com/channels/775374026587373568/1512148475893121114)
 (viewable by members of the Gerrit Discord):
 
