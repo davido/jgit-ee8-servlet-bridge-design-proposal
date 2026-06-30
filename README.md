@@ -272,6 +272,7 @@ already published for review
 ([gitiles change 601822](https://gerrit-review.googlesource.com/c/gitiles/+/601822)),
 and the dual-WAR Gerrit release now has its own design proposal up for review
 ([Gerrit EE8/EE10 flavoured release](https://gerrit-review.googlesource.com/c/homepage/+/602001)).
+See also this announcement:[Two worlds, one tree](https://davido.github.io/gerrit-ee8-ee10-flavoured-announcement).
 To be clear: the dual-WAR work is a
 **future goal and is not requested here** — it is the *motivation* for why JGit
 (and the others) should expose EE8 as a first-class citizen alongside EE10. As
